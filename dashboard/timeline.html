@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>边缘异常检测 · 告警时间线</title>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --panel2:#273449; --text:#e2e8f0; --muted:#94a3b8; --accent:#a78bfa; --warn:#f87171; --ok:#22c55e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:radial-gradient(1200px 600px at 30% -10%,#1e293b,var(--bg)); color:var(--text); min-height:100vh; padding:24px; }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:12px; }
+  h1 { font-size:20px; margin:0; }
+  .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+  .status { font-size:13px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .pill { padding:4px 10px; border-radius:999px; background:var(--panel2); font-size:12px; }
+  .pill.on { color:var(--ok); } .pill.off { color:var(--warn); }
+  .timeline { position:relative; margin-left:8px; padding-left:20px; border-left:2px solid var(--panel2); }
+  .item { position:relative; background:var(--panel); border:1px solid var(--panel2); border-radius:12px; padding:12px 14px; margin-bottom:12px; }
+  .item::before { content:""; position:absolute; left:-27px; top:18px; width:12px; height:12px; border-radius:50%; background:var(--warn); box-shadow:0 0 8px var(--warn); }
+  .meta { font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+  .tag { background:rgba(167,139,250,.15); color:var(--accent); padding:2px 8px; border-radius:6px; font-size:12px; }
+  .text { font-size:14px; line-height:1.6; }
+  .text.llm { border-left:3px solid var(--accent); padding-left:10px; margin-top:6px; color:#ddd6fe; }
+  .empty { color:var(--muted); text-align:center; padding:40px; }
+  .bar { height:6px; background:var(--panel2); border-radius:3px; overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; background:var(--warn); }
+  footer { color:var(--muted); font-size:12px; margin-top:16px; }
+  code { background:#0b1220; padding:2px 6px; border-radius:5px; color:#7dd3fc; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>🛰️ 边缘异常检测 · 告警时间线</h1>
+    <div class="sub">edge-anomaly-llm · 消费 iot-sensor-node 数据流，Z-score 检测 + 大模型解读</div>
+  </div>
+  <div class="status">
+    <span id="sensor" class="pill off">传感器: 未连接</span>
+    <span id="mode" class="pill">模式: —</span>
+    <span id="count" class="pill">告警: 0</span>
+  </div>
+</header>
+
+<div id="timeline" class="timeline"><div class="empty">等待异常事件…（模拟器默认约 4% 概率注入异常）</div></div>
+
+<footer>
+  数据源 <code>SENSOR_URL</code> 默认指向 iot-sensor-node 的 <code>/latest</code>；
+  设置 <code>USE_LLM=1</code> 可让本地 Ollama 生成中文告警解读。
+</footer>
+
+<script>
+let lastAlerts = [];
+async function tick(){
+  try {
+    const st = await (await fetch('/status')).json();
+    const sEl = document.getElementById('sensor');
+    sEl.textContent = '传感器: ' + (st.sensor_ok ? '已连接 ('+st.sensor_last+')' : '未连接');
+    sEl.className = 'pill ' + (st.sensor_ok ? 'on' : 'off');
+    document.getElementById('mode').textContent = '模式: ' + (st.mode==='llm' ? '大模型' : '规则');
+    document.getElementById('count').textContent = '告警: ' + st.alert_count;
+    const al = await (await fetch('/alerts')).json();
+    render(al);
+  } catch(e){}
+}
+function render(alerts){
+  const box = document.getElementById('timeline');
+  if(!alerts.length){ box.innerHTML = '<div class="empty">等待异常事件…</div>'; return; }
+  box.innerHTML = alerts.slice().reverse().map(a=>{
+    const zpct = Math.min(100, Math.abs(a.z)/6*100);
+    const llm = a.llm ? `<div class="text llm">🤖 ${escapeHtml(a.llm)}</div>` : '';
+    return `<div class="item">
+      <div class="meta"><span>🕒 ${a.time}</span><span class="tag">${a.name} / ${a.node}</span><span class="tag">${a.metric_cn}${a.direction}</span><span>值 ${a.value}</span><span>Z=${a.z}</span></div>
+      <div class="text">${escapeHtml(a.rule)}</div>
+      ${llm}
+      <div class="bar"><i style="width:${zpct}%"></i></div>
+    </div>`;
+  }).join('');
+}
+function escapeHtml(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>
