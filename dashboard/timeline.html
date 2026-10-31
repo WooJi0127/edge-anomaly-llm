@@ -56,27 +56,33 @@ async function tick(){
     const sEl = document.getElementById('sensor');
     sEl.textContent = '传感器: ' + (st.sensor_ok ? '已连接 ('+st.sensor_last+')' : '未连接');
     sEl.className = 'pill ' + (st.sensor_ok ? 'on' : 'off');
-    document.getElementById('mode').textContent = '模式: ' + (st.mode==='llm' ? '大模型' : '规则');
+    document.getElementById('mode').textContent = '实际解释: ' + (st.mode==='llm' ? '大模型' : '规则') + (st.explanation_pending ? '（模型等待中）' : '') + (st.fallback_reason ? ' · '+st.fallback_reason : '');
     document.getElementById('count').textContent = '告警: ' + st.alert_count;
     const al = await (await fetch('/alerts')).json();
     render(al);
-  } catch(e){}
+  } catch(e){
+    const sEl = document.getElementById('sensor');
+    sEl.textContent = '服务读取失败，请检查检测服务';
+    sEl.className = 'pill off';
+  }
 }
 function render(alerts){
   const box = document.getElementById('timeline');
   if(!alerts.length){ box.innerHTML = '<div class="empty">等待异常事件…</div>'; return; }
   box.innerHTML = alerts.slice().reverse().map(a=>{
     const zpct = Math.min(100, Math.abs(a.z)/6*100);
-    const llm = a.llm ? `<div class="text llm">🤖 ${escapeHtml(a.llm)}</div>` : '';
+    const llm = a.llm && a.explanation_mode==='llm' ? `<div class="text llm">🤖 ${escapeHtml(a.llm)}</div>` : '';
+    const source = (a.explanation_mode==='llm' ? '模型' : '规则') + (a.explanation_pending ? '（模型等待中）' : '') + (a.fallback_reason ? ' · '+a.fallback_reason : '');
     return `<div class="item">
-      <div class="meta"><span>🕒 ${a.time}</span><span class="tag">${a.name} / ${a.node}</span><span class="tag">${a.metric_cn}${a.direction}</span><span>值 ${a.value}</span><span>Z=${a.z}</span></div>
+      <div class="meta"><span>🕒 ${escapeHtml(a.time)}</span><span class="tag">${escapeHtml(a.name)} / ${escapeHtml(a.node)}</span><span class="tag">${escapeHtml(a.metric_cn)}${escapeHtml(a.direction)}</span><span>值 ${escapeHtml(a.value)}</span><span>Z=${escapeHtml(a.z)}</span></div>
+      <div class="meta"><span>历史均值 ${escapeHtml(a.baseline_mean)}</span><span>标准差 ${escapeHtml(a.baseline_std)}</span><span>历史样本 ${escapeHtml(a.baseline_count)}</span><span>阈值 ${escapeHtml(a.threshold)}</span><span>解释: ${escapeHtml(source)}</span></div>
       <div class="text">${escapeHtml(a.rule)}</div>
       ${llm}
       <div class="bar"><i style="width:${zpct}%"></i></div>
     </div>`;
   }).join('');
 }
-function escapeHtml(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function escapeHtml(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 tick(); setInterval(tick, 2000);
 </script>
 </body>
