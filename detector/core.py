@@ -12,10 +12,13 @@ import math
 import os
 import time
 import urllib.request
-from collections import deque
+import statistics
+import sys
+from collections import OrderedDict, deque
 
 WINDOW = int(os.environ.get("ANOM_WINDOW", "30"))      # 滚动窗口
 Z_THRESH = float(os.environ.get("ANOM_Z", "3.0"))      # Z 分数阈值
+STD_FLOOR = float(os.environ.get("ANOM_STD_FLOOR", "0.000001"))
 USE_LLM = os.environ.get("USE_LLM", "0") == "1"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b")
@@ -26,33 +29,67 @@ _METRIC_CN = {"temp": "温度", "hum": "湿度", "lux": "光照"}
 class AnomalyDetector:
     """维护每个节点的滚动窗口，逐帧判定异常。"""
 
-    def __init__(self, window=WINDOW, z_thresh=Z_THRESH):
+    def __init__(self, window=WINDOW, z_thresh=Z_THRESH, std_floor=STD_FLOOR, max_nodes=256):
+        if type(window) is not int or window < 8:
+            raise ValueError("window must be an integer >= 8")
+        if type(max_nodes) is not int or max_nodes < 1:
+            raise ValueError("max_nodes must be a positive integer")
+        for name, value in (("z_thresh", z_thresh), ("std_floor", std_floor)):
+            if not finite_number(value) or value <= 0:
+                raise ValueError(name + " must be finite and positive")
         self.window = window
         self.z = z_thresh
-        self.buffers = {}
+        self.std_floor = std_floor
+        self.max_nodes = max_nodes
+        self.buffers = OrderedDict()
+        self.last_ts = {}
         self.alerts = deque(maxlen=300)
-        self.mode = "llm" if USE_LLM else "rule"
+        self.mode = "rule"
 
     def _buf(self, node_id):
         if node_id not in self.buffers:
+            if len(self.buffers) >= self.max_nodes:
+                evicted, _ = self.buffers.popitem(last=False)
+                del self.last_ts[evicted]
             self.buffers[node_id] = {k: deque(maxlen=self.window) for k in ("temp", "hum", "lux")}
+        self.buffers.move_to_end(node_id)
         return self.buffers[node_id]
 
     def update(self, readings):
         new_alerts = []
+        if not isinstance(readings, list):
+            return new_alerts
         for r in readings:
+            # Validate the entire node frame before touching any history/timestamp.
+            if not valid_frame(r):
+                continue
+            if r["id"] in self.last_ts and r["ts"] <= self.last_ts[r["id"]]:
+                continue
             buf = self._buf(r["id"])
-            for k in ("temp", "hum", "lux"):
-                buf[k].append(r[k])
             for k in ("temp", "hum", "lux"):
                 series = list(buf[k])
                 if len(series) < 8:
                     continue
-                mean = sum(series) / len(series)
-                var = sum((x - mean) ** 2 for x in series) / len(series)
-                std = math.sqrt(var) or 1e-6
+                mean = statistics.mean(series)
+                try:
+                    std = statistics.pstdev(series)
+                except OverflowError:
+                    # Python 3.10 materializes variance before sqrt; variance
+                    # may overflow even when the standard deviation is finite.
+                    scale = max(abs(value) for value in series)
+                    std = statistics.pstdev([value / scale for value in series]) * scale
+                effective_std = max(std, self.std_floor)
                 val = r[k]
-                z = (val - mean) / std
+                try:
+                    z = (val - mean) / effective_std
+                except OverflowError:
+                    z = val / effective_std - mean / effective_std
+                # Opposite-sign finite values may overflow their difference,
+                # while division by a large std would yield an ordinary Z.
+                if not math.isfinite(z):
+                    z = val / effective_std - mean / effective_std
+                if not math.isfinite(z):
+                    z = math.copysign(sys.float_info.max, z)
                 if abs(z) >= self.z:
                     direction = "升高" if z > 0 else "降低"
                     alert = {
@@ -65,13 +102,36 @@ class AnomalyDetector:
                         "value": round(val, 2),
                         "z": round(z, 2),
                         "direction": direction,
+                        "baseline_mean": mean,
+                        "baseline_std": std,
+                        "effective_std": effective_std,
+                        "baseline_count": len(series),
+                        "threshold": self.z,
+                        "explanation_mode": "rule",
+                        "fallback_reason": None,
                     }
                     alert["rule"] = rule_text(alert)
-                    if USE_LLM:
-                        alert["llm"] = llm_interpret(alert)
                     self.alerts.append(alert)
                     new_alerts.append(alert)
+            for k in _METRIC_CN:
+                buf[k].append(r[k])
+            self.last_ts[r["id"]] = r["ts"]
         return new_alerts
+
+
+def finite_number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def valid_frame(r):
+    return (isinstance(r, dict)
+            and isinstance(r.get("id"), str) and 0 < len(r["id"]) <= 128
+            and isinstance(r.get("name", r["id"]), str)
+            and len(r.get("name", r["id"])) <= 256
+            and all(finite_number(r.get(k)) for k in ("ts", "temp", "hum", "lux")))
 
 
 def rule_text(a):
@@ -88,8 +148,8 @@ def rule_text(a):
     return f"【{m}{a['direction']}】实测 {a['value']}（Z={a['z']}）。可能原因：{cause}。处置建议：{advice}。"
 
 
-def llm_interpret(alert):
-    """调用本地 Ollama 生成中文告警解读；失败则回退规则文本。"""
+def explain_alert(alert):
+    """Return text plus the actual explanation source; network timeout is 20 s."""
     prompt = (
         f"你是一名物联网运维助手。传感器节点「{alert['name']}」({alert['node']}) 出现"
         f"{alert['metric_cn']}{alert['direction']}异常，实测值 {alert['value']}，"
@@ -101,6 +161,16 @@ def llm_interpret(alert):
             OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
         )
         with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.load(resp).get("response", "").strip().replace("\n", " ")
-    except Exception:
-        return rule_text(alert)
+            text = json.load(resp).get("response", "")
+            if isinstance(text, str) and text.strip():
+                return {"llm": text.strip().replace("\n", " "),
+                        "explanation_mode": "llm", "fallback_reason": None}
+            reason = "empty_response"
+    except Exception as exc:
+        reason = "model_error:" + type(exc).__name__
+    return {"llm": rule_text(alert), "explanation_mode": "rule", "fallback_reason": reason}
+
+
+def llm_interpret(alert):
+    """Backward compatible string API, including rule fallback."""
+    return explain_alert(alert)["llm"]
