@@ -1,6 +1,8 @@
 import copy
 import math
+import statistics
 import unittest
+from unittest.mock import patch
 
 from detector.core import AnomalyDetector
 
@@ -108,6 +110,19 @@ class DetectorTests(unittest.TestCase):
                     d.update([frame(ts, temp=value)])
                 alert = d.update([frame(8, temp=sign * 1.7e308)])[0]
                 self.assertAlmostEqual(alert['z'], round(sign * math.sqrt(7), 2))
+
+    def test_python310_variance_overflow_uses_scaled_standard_deviation(self):
+        # Python 3.10 computes sqrt(pvariance), materializing variance as a
+        # float before taking its square root. Reproduce that real CI path.
+        def legacy_pstdev(series):
+            return math.sqrt(statistics.pvariance(series))
+        d = AnomalyDetector(z_thresh=2)
+        for ts, value in enumerate([-1.7e308] * 7 + [1.7e308]):
+            d.update([frame(ts, temp=value)])
+        with patch('detector.core.statistics.pstdev', side_effect=legacy_pstdev):
+            alert = d.update([frame(8, temp=1.7e308)])[0]
+        self.assertAlmostEqual(alert['baseline_std'] / 1.7e308, math.sqrt(7) / 4)
+        self.assertEqual(alert['z'], round(math.sqrt(7), 2))
 
 
 if __name__ == '__main__':

@@ -71,7 +71,13 @@ class AnomalyDetector:
                 if len(series) < 8:
                     continue
                 mean = statistics.mean(series)
-                std = statistics.pstdev(series)
+                try:
+                    std = statistics.pstdev(series)
+                except OverflowError:
+                    # Python 3.10 materializes variance before sqrt; variance
+                    # may overflow even when the standard deviation is finite.
+                    scale = max(abs(value) for value in series)
+                    std = statistics.pstdev([value / scale for value in series]) * scale
                 effective_std = max(std, self.std_floor)
                 val = r[k]
                 try:

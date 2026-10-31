@@ -62,7 +62,7 @@ python -m unittest discover -s tests -v
 python scripts/evaluate.py --seed 20261031
 ```
 
-POSIX 使用 `python3`。2026-10-31 在 Windows、Python 3.14.4 上通过 18 项测试，含实际命令行启动、本地假传感器轮询、HTTP 与慢模型并发、队列满和空响应回退。CI 配置 Python 3.10/3.14，远端结果须另查。
+POSIX 使用 `python3`。2026-10-31 在 Windows、Python 3.14.4 上通过 19 项测试，含实际命令行启动、本地假传感器轮询、HTTP 与慢模型并发、队列满和空响应回退。CI 配置 Python 3.10/3.14，远端结果须另查。
 
 固定种子离线评测每场景 400 样本，暖机前 8 样本排除，窗口 30、阈值 3、下限 `1e-6`。完整指标和混淆矩阵见 [技术说明](docs/technical.md)。
 
